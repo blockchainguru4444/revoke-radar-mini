@@ -22,8 +22,8 @@ export function RootProvider({ children }: { children: ReactNode }) {
         appearance: { mode: "auto" },
         wallet: {
           // für lokale Tests stabiler als "smartWalletOnly"
-          display: "modal",
-          preference: "all",
+          display: "classic",
+          preference: "smartWalletOnly",
         },
       }}
       miniKit={{
