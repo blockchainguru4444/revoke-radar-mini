@@ -2,12 +2,11 @@ const path = require("path");
 
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-  eslint: {
-    ignoreDuringBuilds: true,
-  },
-  typescript: {
-    ignoreBuildErrors: true,
-  },
+  // MVP: ship first
+  typescript: { ignoreBuildErrors: true },
+
+  // Force Webpack build (avoids Turbopack vs custom webpack conflict)
+
   webpack: (config) => {
     config.resolve.alias = {
       ...(config.resolve.alias || {}),
