@@ -3,212 +3,165 @@
 import { useEffect, useMemo, useState } from "react";
 import { Wallet } from "@coinbase/onchainkit/wallet";
 import { useMiniKit } from "@coinbase/onchainkit/minikit";
-import {
-  useAccount,
-  usePublicClient,
-  useSwitchChain,
-  useWriteContract,
-} from "wagmi";
+import { Checkout, CheckoutButton, CheckoutStatus } from "@coinbase/onchainkit/checkout";
+import { useAccount } from "wagmi";
 import styles from "./page.module.css";
 
-import { DEFAULT_CHAIN_IDS, CHAINS, type SupportedChainId } from "../lib/chains";
-import { scanApprovals, type UserSpender } from "../lib/scanApprovals";
-import type { ScanItem, RiskLevel } from "../lib/scanApprovals";
+import {
+  loadCustomSpenders,
+  saveCustomSpenders,
+  loadCustomTokens,
+  saveCustomTokens,
+  isAddress,
+  type CustomSpender,
+  type CustomToken,
+} from "@/lib/custom";
+import type { ScanItem, RiskLevel } from "@/lib/scanTypes";
 
-const HOSTED_CHECKOUT_URL =
-  "https://commerce.coinbase.com/checkout/e3e47a82-3278-49ab-8a6c-537d6c703227";
+const PRO_PRODUCT_ID = "e3e47a82-3278-49ab-8a6c-537d6c703227";
 
-const erc20ApproveAbi = [
-  {
-    type: "function",
-    name: "approve",
-    stateMutability: "nonpayable",
-    inputs: [
-      { name: "spender", type: "address" },
-      { name: "amount", type: "uint256" },
-    ],
-    outputs: [], // some tokens return nothing, some return bool
-  },
-] as const;
+// Keep MVP simple: UI-only chain selection (backend must support it)
+const DEFAULT_CHAIN_IDS = [8453, 1, 10, 42161] as const;
+const CHAIN_LABEL: Record<number, string> = {
+  8453: "Base",
+  1: "Ethereum",
+  10: "Optimism",
+  42161: "Arbitrum",
+};
 
 export default function Home() {
   const { setMiniAppReady, isMiniAppReady } = useMiniKit();
   const { address, isConnected } = useAccount();
 
-  const publicClient = usePublicClient();
-  const { switchChainAsync } = useSwitchChain();
-  const { writeContractAsync } = useWriteContract();
-
   const [isScanning, setIsScanning] = useState(false);
   const [results, setResults] = useState<ScanItem[]>([]);
   const [lastScan, setLastScan] = useState<string | null>(null);
+  const [showRiskyOnly, setShowRiskyOnly] = useState(false);
 
-  // MVP: Pro unlock stored locally (manual). We'll secure later with webhook verification.
+  // MVP: Pro unlock stored locally (later: webhook verification)
   const [isPro, setIsPro] = useState(false);
 
-  // Multi-chain MVP
-  const [selectedChains, setSelectedChains] =
-    useState<SupportedChainId[]>(DEFAULT_CHAIN_IDS);
+  // Chains
+  const [chainIds, setChainIds] = useState<number[]>([...DEFAULT_CHAIN_IDS]);
 
-  // Custom spenders (makes it useful immediately)
-  const [userSpenders, setUserSpenders] = useState<UserSpender[]>([]);
-  const [spenderInput, setSpenderInput] = useState(""); // "Name,0x..."
+  // Custom Spenders
+  const [customSpenders, setCustomSpenders] = useState<CustomSpender[]>([]);
+  const [spenderInput, setSpenderInput] = useState("");
+  const [spenderNameInput, setSpenderNameInput] = useState("");
 
-  const [revokingKey, setRevokingKey] = useState<string | null>(null);
-
-  // UX toggles
-  const [riskyOnly, setRiskyOnly] = useState(true);
+  // Custom Tokens (NEW)
+  const [customTokens, setCustomTokens] = useState<CustomToken[]>([]);
+  const [tokenInput, setTokenInput] = useState("");
+  const [tokenLabelInput, setTokenLabelInput] = useState("");
 
   useEffect(() => {
     if (!isMiniAppReady) setMiniAppReady();
   }, [setMiniAppReady, isMiniAppReady]);
 
-  // Load local settings
   useEffect(() => {
-    const pro = localStorage.getItem("revokeRadarPro");
-    if (pro === "true") setIsPro(true);
+    const v = localStorage.getItem("revokeRadarPro");
+    if (v === "true") setIsPro(true);
 
-    const savedChains = localStorage.getItem("revokeRadarChains");
-    if (savedChains) {
-      try {
-        const parsed = JSON.parse(savedChains) as SupportedChainId[];
-        if (Array.isArray(parsed) && parsed.length) setSelectedChains(parsed);
-      } catch {}
-    }
-
-    const savedSpenders = localStorage.getItem("revokeRadarSpenders");
-    if (savedSpenders) {
-      try {
-        const parsed = JSON.parse(savedSpenders) as UserSpender[];
-        if (Array.isArray(parsed)) setUserSpenders(parsed);
-      } catch {}
-    }
-
-    const savedRiskyOnly = localStorage.getItem("revokeRadarRiskyOnly");
-    if (savedRiskyOnly === "false") setRiskyOnly(false);
+    setCustomSpenders(loadCustomSpenders());
+    setCustomTokens(loadCustomTokens());
   }, []);
-
-  // Persist chains/spenders/toggles
-  useEffect(() => {
-    localStorage.setItem("revokeRadarChains", JSON.stringify(selectedChains));
-  }, [selectedChains]);
-
-  useEffect(() => {
-    localStorage.setItem("revokeRadarSpenders", JSON.stringify(userSpenders));
-  }, [userSpenders]);
-
-  useEffect(() => {
-    localStorage.setItem("revokeRadarRiskyOnly", riskyOnly ? "true" : "false");
-  }, [riskyOnly]);
 
   const shortAddress = useMemo(() => {
     if (!address) return "";
     return `${address.slice(0, 6)}…${address.slice(-4)}`;
   }, [address]);
 
-  function getNowLabel() {
-    const d = new Date();
-    return d.toLocaleString();
+  function nowLabel() {
+    return new Date().toLocaleString();
+  }
+
+  function toggleChain(id: number) {
+    setChainIds((prev) => {
+      const has = prev.includes(id);
+      const next = has ? prev.filter((x) => x !== id) : [...prev, id];
+      return next.length ? next : prev; // never allow empty
+    });
+  }
+
+  function addCustomSpender() {
+    const s = spenderInput.trim();
+    const n = spenderNameInput.trim() || "Custom";
+    if (!isAddress(s)) return alert("Please paste a valid 0x spender address.");
+    const next = [...customSpenders, { name: n.slice(0, 32), address: s }];
+    // unique by address
+    const uniq = uniqueBy(next, (x) => x.address.toLowerCase());
+    setCustomSpenders(uniq);
+    saveCustomSpenders(uniq);
+    setSpenderInput("");
+    setSpenderNameInput("");
+  }
+
+  function removeCustomSpender(addr: `0x${string}`) {
+    const next = customSpenders.filter((x) => x.address.toLowerCase() !== addr.toLowerCase());
+    setCustomSpenders(next);
+    saveCustomSpenders(next);
+  }
+
+  function addCustomToken() {
+    const a = tokenInput.trim();
+    const lbl = (tokenLabelInput.trim() || "Custom Token").slice(0, 32);
+    if (!isAddress(a)) return alert("Please paste a valid 0x token contract address.");
+    const next = [...customTokens, { address: a, label: lbl }];
+    const uniq = uniqueBy(next, (x) => x.address.toLowerCase());
+    setCustomTokens(uniq);
+    saveCustomTokens(uniq);
+    setTokenInput("");
+    setTokenLabelInput("");
+  }
+
+  function removeCustomToken(addr: `0x${string}`) {
+    const next = customTokens.filter((x) => x.address.toLowerCase() !== addr.toLowerCase());
+    setCustomTokens(next);
+    saveCustomTokens(next);
   }
 
   async function runScan() {
     if (!isConnected || !address) return;
 
-    if (!selectedChains.length) {
-      alert("Select at least one chain to scan.");
-      return;
-    }
-
     setIsScanning(true);
     setResults([]);
 
     try {
-      const items = await scanApprovals({
-        owner: address as `0x${string}`,
-        chainIds: selectedChains,
-        isPro,
-        userSpenders,
+      const res = await fetch("/api/scan", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          owner: address,
+          isPro,
+          chainIds,
+          customSpenders,
+          customTokens,
+        }),
       });
 
-      setResults(items);
-      setLastScan(getNowLabel());
+      if (!res.ok) throw new Error(`Scan failed: ${res.status}`);
+      const data = (await res.json()) as { items?: ScanItem[] };
+
+      setResults(Array.isArray(data.items) ? data.items : []);
+      setLastScan(nowLabel());
     } catch (e: any) {
       console.error(e);
-      setLastScan(`Scan failed: ${String(e?.message ?? e)}`);
+      alert("Scan failed. Check /api/scan logs on Vercel or your terminal.");
     } finally {
       setIsScanning(false);
     }
   }
 
-  async function revokeApproval(item: ScanItem) {
-    if (!isConnected || !address) return;
+  const filtered = useMemo(() => {
+    const base = results;
+    if (!showRiskyOnly) return base;
+    return base.filter((x) => x.risk !== "green");
+  }, [results, showRiskyOnly]);
 
-    const ok = confirm(
-      `Revoke approval?\n\nChain: ${item.chainName}\nToken: ${item.tokenSymbol}\nSpender: ${item.spenderName}\n\nThis will set allowance to 0.`
-    );
-    if (!ok) return;
-
-    const key = `${item.chainId}-${item.tokenAddress}-${item.spenderAddress}`;
-    setRevokingKey(key);
-
-    try {
-      // switch to the chain where this approval lives
-      await switchChainAsync({ chainId: item.chainId });
-
-      const hash = await writeContractAsync({
-        abi: erc20ApproveAbi,
-        address: item.tokenAddress,
-        functionName: "approve",
-        args: [item.spenderAddress, 0n],
-      });
-
-      // wait to be mined (best effort)
-      try {
-        if (publicClient) {
-          await publicClient.waitForTransactionReceipt({ hash });
-        }
-      } catch {}
-
-      // refresh
-      await runScan();
-    } catch (e) {
-      console.error(e);
-      alert("Revoke failed or was rejected. Please confirm in your wallet.");
-    } finally {
-      setRevokingKey(null);
-    }
-  }
-
-  function toggleChain(id: SupportedChainId, checked: boolean) {
-    setSelectedChains((prev) =>
-      checked ? Array.from(new Set([...prev, id])) : prev.filter((x) => x !== id)
-    );
-  }
-
-  function addSpender() {
-    const [nameRaw, addrRaw] = spenderInput.split(",").map((s) => s.trim());
-    const name = nameRaw?.slice(0, 40) ?? "";
-    const addr = addrRaw ?? "";
-
-    if (!name || !addr || !addr.startsWith("0x") || addr.length < 10) {
-      alert('Use: "Name,0xAddress"');
-      return;
-    }
-
-    setUserSpenders((prev) => [
-      ...prev,
-      { name, address: addr as `0x${string}` },
-    ]);
-    setSpenderInput("");
-  }
-
-  function removeSpender(address: `0x${string}`) {
-    setUserSpenders((prev) => prev.filter((s) => s.address !== address));
-  }
-
-  const visibleResults = riskyOnly
-    ? results.filter((r) => r.risk !== "green")
-    : results;
+  const coverageLabel = useMemo(() => {
+    const names = chainIds.map((id) => CHAIN_LABEL[id] || `Chain ${id}`);
+    return `${names.length} chain(s)`;
+  }, [chainIds]);
 
   return (
     <div className={styles.container}>
@@ -236,305 +189,218 @@ export default function Home() {
       </header>
 
       <main className={styles.main}>
+        {/* SCAN CARD */}
         <section className={styles.card}>
           <h2 className={styles.cardTitle}>Approval Scan</h2>
           <p className={styles.cardText}>
-            We scan token approvals (allowances) across multiple chains and flag
-            risky permissions with a traffic-light system.
+            We scan token approvals (allowances) and flag risky permissions with a traffic-light system.
           </p>
 
-          {/* Chain selection (top in scan-card) */}
+          {/* Chains */}
           <div style={{ marginTop: 10 }}>
-            <div style={{ fontSize: 13, opacity: 0.85, marginBottom: 6 }}>
-              Chains
-            </div>
-
-            <div
-              style={{
-                display: "flex",
-                gap: 10,
-                flexWrap: "wrap",
-                alignItems: "center",
-              }}
-            >
+            <div style={{ fontSize: 13, opacity: 0.85, marginBottom: 6 }}>Chains</div>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 12 }}>
               {DEFAULT_CHAIN_IDS.map((id) => (
-                <label
-                  key={id}
-                  style={{
-                    fontSize: 13,
-                    display: "flex",
-                    gap: 6,
-                    alignItems: "center",
-                    userSelect: "none",
-                  }}
-                >
+                <label key={id} style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 13 }}>
                   <input
                     type="checkbox"
-                    checked={selectedChains.includes(id)}
-                    onChange={(e) => toggleChain(id, e.target.checked)}
+                    checked={chainIds.includes(id)}
+                    onChange={() => toggleChain(id)}
                   />
-                  {CHAINS[id].name}
+                  {CHAIN_LABEL[id]}
                 </label>
               ))}
             </div>
           </div>
 
-          {/* Custom spender input */}
-          <div style={{ marginTop: 12 }}>
-            <div style={{ fontSize: 13, opacity: 0.85, marginBottom: 6 }}>
-              Custom spenders (optional)
-            </div>
-
-            <div
-              style={{
-                display: "flex",
-                gap: 8,
-                flexWrap: "wrap",
-                alignItems: "center",
-              }}
-            >
+          {/* Custom spenders */}
+          <div style={{ marginTop: 14 }}>
+            <div style={{ fontSize: 13, opacity: 0.85, marginBottom: 6 }}>Custom spenders (optional)</div>
+            <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+              <input
+                value={spenderNameInput}
+                onChange={(e) => setSpenderNameInput(e.target.value)}
+                placeholder="Name (e.g. Uniswap Router)"
+                style={inputStyle}
+              />
               <input
                 value={spenderInput}
                 onChange={(e) => setSpenderInput(e.target.value)}
-                placeholder='Add spender: "Uniswap Router,0x..."'
-                style={{
-                  padding: 10,
-                  borderRadius: 10,
-                  border: "1px solid rgba(255,255,255,0.12)",
-                  minWidth: 280,
-                  background: "transparent",
-                  color: "inherit",
-                  outline: "none",
-                }}
+                placeholder="Spender 0x…"
+                style={{ ...inputStyle, minWidth: 320 }}
               />
-              <button
-                className={styles.secondaryButton}
-                onClick={addSpender}
-                type="button"
-              >
+              <button className={styles.secondaryButton} onClick={addCustomSpender}>
                 Add
               </button>
-
-              {userSpenders.length > 0 && (
-                <div style={{ fontSize: 12, opacity: 0.75 }}>
-                  Scanning {userSpenders.length} custom spender(s)
-                </div>
-              )}
             </div>
 
-            {userSpenders.length > 0 && (
-              <div
-                style={{
-                  marginTop: 8,
-                  display: "flex",
-                  gap: 8,
-                  flexWrap: "wrap",
-                }}
-              >
-                {userSpenders.map((s) => (
-                  <span
+            {customSpenders.length > 0 && (
+              <div style={{ marginTop: 8, display: "flex", flexWrap: "wrap", gap: 8 }}>
+                {customSpenders.map((s) => (
+                  <Chip
                     key={s.address}
-                    style={{
-                      fontSize: 12,
-                      padding: "6px 10px",
-                      borderRadius: 999,
-                      border: "1px solid rgba(255,255,255,0.12)",
-                      display: "inline-flex",
-                      gap: 8,
-                      alignItems: "center",
-                    }}
-                    title={s.address}
-                  >
-                    {s.name}
-                    <button
-                      className={styles.ghostButton}
-                      onClick={() => removeSpender(s.address)}
-                      type="button"
-                      title="Remove"
-                    >
-                      ✕
-                    </button>
-                  </span>
+                    label={`${s.name}: ${short(s.address)}`}
+                    onRemove={() => removeCustomSpender(s.address)}
+                  />
                 ))}
               </div>
             )}
           </div>
 
-          <div className={styles.actions} style={{ marginTop: 12 }}>
+          {/* Custom tokens */}
+          <div style={{ marginTop: 14 }}>
+            <div style={{ fontSize: 13, opacity: 0.85, marginBottom: 6 }}>
+              Custom tokens (recommended)
+            </div>
+            <div style={{ fontSize: 12, opacity: 0.7, marginBottom: 8 }}>
+              Paste token contract addresses from Etherscan/Blockscout. This finds approvals even if you no longer hold the token.
+            </div>
+
+            <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+              <input
+                value={tokenLabelInput}
+                onChange={(e) => setTokenLabelInput(e.target.value)}
+                placeholder="Label (e.g. USDC)"
+                style={inputStyle}
+              />
+              <input
+                value={tokenInput}
+                onChange={(e) => setTokenInput(e.target.value)}
+                placeholder="Token contract 0x…"
+                style={{ ...inputStyle, minWidth: 320 }}
+              />
+              <button className={styles.secondaryButton} onClick={addCustomToken}>
+                Add
+              </button>
+            </div>
+
+            {customTokens.length > 0 && (
+              <div style={{ marginTop: 8, display: "flex", flexWrap: "wrap", gap: 8 }}>
+                {customTokens.map((t) => (
+                  <Chip
+                    key={t.address}
+                    label={`${t.label}: ${short(t.address)}`}
+                    onRemove={() => removeCustomToken(t.address)}
+                  />
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Scan action */}
+          <div className={styles.actions} style={{ marginTop: 16 }}>
             <button
               className={styles.primaryButton}
               onClick={runScan}
-              disabled={!isConnected || isScanning || selectedChains.length === 0}
-              title={
-                !isConnected
-                  ? "Please connect your wallet first"
-                  : selectedChains.length === 0
-                  ? "Select at least one chain"
-                  : "Start scan"
-              }
-              type="button"
+              disabled={!isConnected || isScanning}
+              title={!isConnected ? "Please connect your wallet first" : "Start scan"}
             >
-              {isScanning
-                ? "Scanning…"
-                : isPro
-                ? "Scan Approvals (Pro)"
-                : "Scan Approvals"}
+              {isScanning ? "Scanning…" : isPro ? "Scan Approvals (Pro)" : "Scan Approvals"}
             </button>
 
             <div className={styles.meta}>
               {lastScan ? (
-                <span>Last scan: {lastScan}</span>
+                <span>
+                  Last scan: {lastScan} &nbsp;&nbsp; Coverage: {coverageLabel} {isPro ? "• Deep scan" : ""}
+                </span>
               ) : (
-                <span>No scan yet</span>
+                <span>Ready.</span>
               )}
-              <span style={{ marginLeft: 10, opacity: 0.7 }}>
-                Coverage: {selectedChains.length} chain(s) •{" "}
-                {isPro ? "Deep" : "Basic"} scan
-              </span>
             </div>
           </div>
         </section>
 
+        {/* RESULTS */}
         <section className={styles.card}>
           <div className={styles.resultsHeader}>
             <h2 className={styles.cardTitle}>Results</h2>
 
-            <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
+            <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
               <div className={styles.legend}>
                 <LegendDot risk="green" label="Good" />
                 <LegendDot risk="orange" label="Meh" />
                 <LegendDot risk="red" label="Risky" />
               </div>
 
-              <button
-                className={styles.ghostButton}
-                onClick={() => setRiskyOnly((v) => !v)}
-                type="button"
-                title="Toggle safe rows"
-              >
-                {riskyOnly ? "Show All" : "Show Risky Only"}
+              <button className={styles.secondaryButton} onClick={() => setShowRiskyOnly((v) => !v)}>
+                {showRiskyOnly ? "Show All" : "Show Risky Only"}
               </button>
             </div>
           </div>
 
-          {visibleResults.length === 0 ? (
+          {filtered.length === 0 ? (
             <div className={styles.empty}>
               {isScanning
                 ? "Scanning approvals…"
-                : riskyOnly
-                ? "No risky approvals found. You're clean ✅ (Try Show All or add a custom spender.)"
                 : "No approvals found for the selected coverage."}
             </div>
           ) : (
             <ul className={styles.resultsList}>
-              {visibleResults.map((item, idx) => {
-                const key = `${item.chainId}-${item.tokenAddress}-${item.spenderAddress}`;
-                return (
-                  <li key={`${key}-${idx}`} className={styles.resultRow}>
-                    <div className={styles.riskCell}>
-                      <RiskDot risk={item.risk} />
-                    </div>
+              {filtered.map((item, idx) => (
+                <li key={`${item.chainId}-${item.tokenAddress}-${item.spenderAddress}-${idx}`} className={styles.resultRow}>
+                  <div className={styles.riskCell}>
+                    <RiskDot risk={item.risk} />
+                  </div>
 
-                    <div className={styles.resultMain}>
-                      <div className={styles.resultTop}>
-                        <div className={styles.tokenLine}>
-                          <span className={styles.token}>{item.tokenSymbol}</span>
-                          <span className={styles.allowance}>{item.allowanceLabel}</span>
-                        </div>
-
-                        <div className={styles.spenderLine}>
-                          <span className={styles.spenderName}>{item.spenderName}</span>
-                          <span className={styles.mono}>{short(item.spenderAddress)}</span>
-                        </div>
-
-                        <div style={{ fontSize: 12, opacity: 0.75, marginTop: 4 }}>
-                          Chain: <b>{item.chainName}</b>
-                        </div>
+                  <div className={styles.resultMain}>
+                    <div className={styles.resultTop}>
+                      <div className={styles.tokenLine}>
+                        <span className={styles.token}>
+                          {item.tokenSymbol} <span style={{ opacity: 0.7, fontSize: 12 }}>({item.chainName})</span>
+                        </span>
+                        <span className={styles.allowance}>{item.allowanceLabel}</span>
                       </div>
 
-                      <div className={styles.reason}>{item.reason}</div>
-
-                      <div className={styles.rowActions}>
-                        <button
-                          className={styles.secondaryButton}
-                          onClick={() => revokeApproval(item)}
-                          disabled={!isConnected || revokingKey === key}
-                          title="Revoke this approval (sets allowance to 0)"
-                          type="button"
-                        >
-                          {revokingKey === key ? "Revoking…" : "Revoke"}
-                        </button>
-
-                        <button
-                          className={styles.ghostButton}
-                          onClick={() => navigator.clipboard.writeText(item.spenderAddress)}
-                          title="Copy spender address"
-                          type="button"
-                        >
-                          Copy spender
-                        </button>
-
-                        <button
-                          className={styles.ghostButton}
-                          onClick={() => navigator.clipboard.writeText(item.tokenAddress)}
-                          title="Copy token address"
-                          type="button"
-                        >
-                          Copy token
-                        </button>
+                      <div className={styles.spenderLine}>
+                        <span className={styles.spenderName}>{item.spenderName}</span>
+                        <span className={styles.mono}>{short(item.spenderAddress)}</span>
                       </div>
                     </div>
-                  </li>
-                );
-              })}
+
+                    <div className={styles.reason}>{item.reason}</div>
+
+                    <div className={styles.rowActions}>
+                      <button className={styles.secondaryButton} disabled title="Coming next">
+                        Revoke (next)
+                      </button>
+
+                      <button
+                        className={styles.ghostButton}
+                        onClick={() => navigator.clipboard.writeText(item.spenderAddress)}
+                        title="Copy spender address"
+                      >
+                        Copy spender
+                      </button>
+                    </div>
+                  </div>
+                </li>
+              ))}
             </ul>
           )}
 
-          {/* PRO UNLOCK (FAST MVP) */}
-          <div
-            style={{
-              marginTop: 14,
-              display: "flex",
-              gap: 12,
-              flexWrap: "wrap",
-              alignItems: "center",
-            }}
-          >
+          {/* PRO UNLOCK */}
+          <div style={{ marginTop: 14, display: "flex", gap: 12, flexWrap: "wrap", alignItems: "center" }}>
             {isPro ? (
-              <div style={{ fontSize: 13, opacity: 0.9 }}>
-                ✅ Pro unlocked — Deep Scan enabled.
-              </div>
+              <div style={{ fontSize: 13, opacity: 0.9 }}>✅ Pro unlocked — Deep Scan enabled.</div>
             ) : (
               <>
                 <div style={{ fontSize: 13, opacity: 0.85 }}>
                   Want a deeper scan? Unlock Pro for <b>$3</b>.
                 </div>
 
-                <button
-                  className={styles.primaryButton}
-                  onClick={() => window.open(HOSTED_CHECKOUT_URL, "_blank")}
-                  title="Opens Coinbase Commerce checkout"
-                  type="button"
-                >
-                  Unlock Pro ($3)
-                </button>
-
-                <button
-                  className={styles.ghostButton}
-                  onClick={() => {
-                    // MVP unlock (manual). We'll secure later with webhook verification.
-                    localStorage.setItem("revokeRadarPro", "true");
-                    setIsPro(true);
+                <Checkout
+                  productId={PRO_PRODUCT_ID}
+                  onStatus={(status) => {
+                    // MVP: unlock locally if payment succeeds
+                    if (status?.statusName === "success") {
+                      localStorage.setItem("revokeRadarPro", "true");
+                      setIsPro(true);
+                    }
                   }}
-                  title="After you paid, tap to unlock Pro (MVP)"
-                  type="button"
                 >
-                  I already paid
-                </button>
-
-                <div style={{ fontSize: 12, opacity: 0.7 }}>
-                  MVP note: Pro unlock is manual for now. Auto-verify via webhook comes next.
-                </div>
+                  <CheckoutButton />
+                  <CheckoutStatus />
+                </Checkout>
               </>
             )}
           </div>
@@ -548,17 +414,36 @@ export default function Home() {
   );
 }
 
+const inputStyle: React.CSSProperties = {
+  background: "rgba(255,255,255,0.04)",
+  border: "1px solid rgba(255,255,255,0.12)",
+  borderRadius: 10,
+  padding: "10px 12px",
+  color: "inherit",
+  outline: "none",
+  fontSize: 13,
+  minWidth: 220,
+};
+
+function uniqueBy<T>(arr: T[], key: (t: T) => string) {
+  const seen = new Set<string>();
+  const out: T[] = [];
+  for (const it of arr) {
+    const k = key(it);
+    if (seen.has(k)) continue;
+    seen.add(k);
+    out.push(it);
+  }
+  return out;
+}
+
 function short(addr: string) {
   return `${addr.slice(0, 6)}…${addr.slice(-4)}`;
 }
 
 function RiskDot({ risk }: { risk: RiskLevel }) {
   const cls =
-    risk === "green"
-      ? styles.dotGreen
-      : risk === "orange"
-      ? styles.dotOrange
-      : styles.dotRed;
+    risk === "green" ? styles.dotGreen : risk === "orange" ? styles.dotOrange : styles.dotRed;
   return <span className={`${styles.dot} ${cls}`} />;
 }
 
@@ -567,6 +452,40 @@ function LegendDot({ risk, label }: { risk: RiskLevel; label: string }) {
     <span className={styles.legendItem}>
       <RiskDot risk={risk} />
       <span>{label}</span>
+    </span>
+  );
+}
+
+function Chip({ label, onRemove }: { label: string; onRemove: () => void }) {
+  return (
+    <span
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 10,
+        padding: "6px 10px",
+        borderRadius: 999,
+        border: "1px solid rgba(255,255,255,0.12)",
+        background: "rgba(255,255,255,0.04)",
+        fontSize: 12,
+      }}
+    >
+      <span style={{ opacity: 0.9 }}>{label}</span>
+      <button
+        onClick={onRemove}
+        style={{
+          background: "transparent",
+          border: "none",
+          color: "inherit",
+          opacity: 0.7,
+          cursor: "pointer",
+          fontSize: 14,
+          lineHeight: 1,
+        }}
+        title="Remove"
+      >
+        ×
+      </button>
     </span>
   );
 }
