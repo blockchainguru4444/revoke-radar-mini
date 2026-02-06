@@ -3,16 +3,12 @@
 import { useEffect, useMemo, useState } from "react";
 import { Wallet } from "@coinbase/onchainkit/wallet";
 import { useMiniKit } from "@coinbase/onchainkit/minikit";
-import {
-  Checkout,
-  CheckoutButton,
-  CheckoutStatus,
-} from "@coinbase/onchainkit/checkout";
+import { Checkout, CheckoutButton, CheckoutStatus } from "@coinbase/onchainkit/checkout";
 import { useAccount, useChainId } from "wagmi";
 import styles from "./page.module.css";
 
 const BASE_CHAIN_ID = 8453;
-const PRO_PRODUCT_ID = "e3e47a82-3278-49ab-8a6c-537d6c703227"; // your Coinbase Commerce product/checkout id
+const PRO_PRODUCT_ID = "e3e47a82-3278-49ab-8a6c-537d6c703227";
 const PRO_STORAGE_KEY = "revokeRadarPro";
 
 type RiskLevel = "green" | "orange" | "red";
@@ -22,15 +18,24 @@ type ScanItem = {
   tokenAddress: `0x${string}`;
   spenderName: string;
   spenderAddress: `0x${string}`;
-  allowanceLabel: string; // e.g. "Unlimited", "250.00"
+  allowanceLabel: string;
   risk: RiskLevel;
   reason: string;
+};
+
+type ScanMeta = {
+  tokensChecked: number;
+  spendersChecked: number;
+  calls: number;
+  errors: number;
+  durationMs: number;
 };
 
 type ScanApiResponse =
   | ScanItem[]
   | {
       items: ScanItem[];
+      meta?: ScanMeta;
     };
 
 export default function Home() {
@@ -43,6 +48,7 @@ export default function Home() {
   const [scanError, setScanError] = useState<string | null>(null);
   const [results, setResults] = useState<ScanItem[]>([]);
   const [lastScan, setLastScan] = useState<string | null>(null);
+  const [scanMeta, setScanMeta] = useState<ScanMeta | null>(null);
 
   useEffect(() => {
     if (!isMiniAppReady) setMiniAppReady();
@@ -72,6 +78,7 @@ export default function Home() {
 
   async function runScan(mode: "free" | "pro") {
     setScanError(null);
+    setScanMeta(null);
 
     if (!isConnected || !address) {
       setScanError("Please connect your wallet first.");
@@ -99,14 +106,14 @@ export default function Home() {
         }),
       });
 
-      if (!res.ok) {
-        throw new Error(`Scan failed (${res.status})`);
-      }
+      if (!res.ok) throw new Error(`Scan failed (${res.status})`);
 
       const json = (await res.json()) as ScanApiResponse;
       const items = normalizeScanResponse(json);
 
-      // Sort: red first, then orange, then green
+      const meta = !Array.isArray(json) ? (json.meta ?? null) : null;
+      setScanMeta(meta);
+
       const order: Record<RiskLevel, number> = { red: 0, orange: 1, green: 2 };
       items.sort((a, b) => order[a.risk] - order[b.risk]);
 
@@ -114,9 +121,7 @@ export default function Home() {
       setLastScan(nowLabel());
 
       if (items.length === 0) {
-        setScanError(
-          "No approvals found on Base for your wallet (or none matched our known spender list)."
-        );
+        setScanError("No approvals found on Base for your wallet (or none matched our known spender list).");
       }
     } catch (e) {
       const msg = e instanceof Error ? e.message : "Unknown error";
@@ -130,6 +135,7 @@ export default function Home() {
     setResults([]);
     setScanError(null);
     setLastScan(null);
+    setScanMeta(null);
   }
 
   async function copyReport() {
@@ -137,6 +143,11 @@ export default function Home() {
     lines.push("Revoke Radar — Approval Report (Base)");
     if (address) lines.push(`Wallet: ${address}`);
     if (lastScan) lines.push(`Scanned: ${lastScan}`);
+    if (scanMeta) {
+      lines.push(
+        `Coverage: ${scanMeta.tokensChecked} tokens × ${scanMeta.spendersChecked} spenders | calls=${scanMeta.calls} errors=${scanMeta.errors} time=${scanMeta.durationMs}ms`
+      );
+    }
     lines.push("");
 
     if (results.length === 0) {
@@ -163,7 +174,6 @@ export default function Home() {
 
   return (
     <div className={styles.container}>
-      {/* HEADER */}
       <header className={styles.header}>
         <div className={styles.brand}>
           <div className={styles.logoDot} />
@@ -178,8 +188,7 @@ export default function Home() {
           <div className={styles.walletStatus}>
             {isConnected ? (
               <span className={styles.connected}>
-                Connected: <b>{shortAddress}</b> • Network:{" "}
-                <b>{isOnBase ? "Base" : `Wrong (${chainId ?? "?"})`}</b>
+                Connected: <b>{shortAddress}</b> • Network: <b>{isOnBase ? "Base" : `Wrong (${chainId ?? "?"})`}</b>
               </span>
             ) : (
               <span className={styles.disconnected}>Not connected</span>
@@ -189,15 +198,13 @@ export default function Home() {
       </header>
 
       <main className={styles.main}>
-        {/* SCAN CARD (TOP) */}
+        {/* SCAN CARD */}
         <section className={styles.card}>
           <h2 className={styles.cardTitle}>Approval Scan</h2>
-
           <p className={styles.cardText}>
             MVP is <b>Base-only</b>. We detect active ERC-20 approvals and label risk with a traffic light.
           </p>
 
-          {/* Status / error */}
           {(scanError || !isOnBase) && (
             <div
               style={{
@@ -219,7 +226,6 @@ export default function Home() {
             </div>
           )}
 
-          {/* Actions */}
           <div className={styles.actions} style={{ marginTop: 12 }}>
             <button
               className={styles.primaryButton}
@@ -240,21 +246,11 @@ export default function Home() {
               Deep Scan (Pro)
             </button>
 
-            <button
-              className={styles.ghostButton}
-              onClick={copyReport}
-              disabled={isScanning}
-              title="Copy a text report to clipboard"
-            >
+            <button className={styles.ghostButton} onClick={copyReport} disabled={isScanning} title="Copy report">
               Copy report
             </button>
 
-            <button
-              className={styles.ghostButton}
-              onClick={clearResults}
-              disabled={isScanning}
-              title="Clear results"
-            >
+            <button className={styles.ghostButton} onClick={clearResults} disabled={isScanning} title="Clear results">
               Clear
             </button>
 
@@ -263,20 +259,17 @@ export default function Home() {
             </div>
           </div>
 
-          {/* PRO UNLOCK */}
-          <div
-            style={{
-              marginTop: 14,
-              display: "flex",
-              gap: 12,
-              flexWrap: "wrap",
-              alignItems: "center",
-            }}
-          >
+          {scanMeta && (
+            <div style={{ marginTop: 10, fontSize: 12, opacity: 0.8 }}>
+              Coverage: <b>{scanMeta.tokensChecked}</b> tokens × <b>{scanMeta.spendersChecked}</b> spenders • RPC calls:{" "}
+              <b>{scanMeta.calls}</b> • Errors: <b>{scanMeta.errors}</b> • Time: <b>{Math.round(scanMeta.durationMs)}ms</b>
+              {scanMeta.errors > 0 && <span style={{ marginLeft: 10 }}>⚠ Scan may be incomplete — try again.</span>}
+            </div>
+          )}
+
+          <div style={{ marginTop: 14, display: "flex", gap: 12, flexWrap: "wrap", alignItems: "center" }}>
             {isPro ? (
-              <div style={{ fontSize: 13, opacity: 0.9 }}>
-                ✅ Pro unlocked — Deep Scan enabled (device-based MVP unlock).
-              </div>
+              <div style={{ fontSize: 13, opacity: 0.9 }}>✅ Pro unlocked — Deep Scan enabled (device-based MVP).</div>
             ) : (
               <>
                 <div style={{ fontSize: 13, opacity: 0.85 }}>
@@ -286,9 +279,8 @@ export default function Home() {
                 <Checkout
                   productId={PRO_PRODUCT_ID}
                   onStatus={(status) => {
-                    // MVP: device-based unlock (we'll add webhook verification later)
                     if (status?.statusName === "success") {
-                      localStorage.setItem(PRO_STORAGE_KEY, "true");
+                      localStorage.setItem("revokeRadarPro", "true");
                       setIsPro(true);
                       setScanError("✅ Pro unlocked on this device.");
                       setTimeout(() => setScanError(null), 1800);
@@ -316,11 +308,7 @@ export default function Home() {
 
           {results.length === 0 ? (
             <div className={styles.empty}>
-              {isScanning
-                ? "Scanning approvals…"
-                : isConnected
-                ? "No results yet. Run a scan to see approvals on Base."
-                : "Connect your wallet to start scanning."}
+              {isScanning ? "Scanning approvals…" : isConnected ? "No results yet. Run a scan to see approvals on Base." : "Connect your wallet to start scanning."}
             </div>
           ) : (
             <ul className={styles.resultsList}>
@@ -373,7 +361,7 @@ export default function Home() {
           )}
 
           <div style={{ marginTop: 14, fontSize: 12, opacity: 0.75 }}>
-            MVP notes: Base-only • Pro unlock is device-based (we’ll add server verification next) • Revoke action coming next
+            MVP: Base-only • Pro unlock is device-based (server verification next) • Revoke action coming next
           </div>
         </section>
       </main>
@@ -388,12 +376,7 @@ function short(addr: string) {
 }
 
 function RiskDot({ risk }: { risk: RiskLevel }) {
-  const cls =
-    risk === "green"
-      ? styles.dotGreen
-      : risk === "orange"
-      ? styles.dotOrange
-      : styles.dotRed;
+  const cls = risk === "green" ? styles.dotGreen : risk === "orange" ? styles.dotOrange : styles.dotRed;
   return <span className={`${styles.dot} ${cls}`} />;
 }
 
